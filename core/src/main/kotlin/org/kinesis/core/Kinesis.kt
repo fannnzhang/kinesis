@@ -3,15 +3,21 @@ package org.kinesis.core
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.filterNot
+import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import mu.KLogger
+import mu.KotlinLogging
 import java.util.logging.Logger
+import java.util.logging.Level
 import kotlin.coroutines.CoroutineContext
 
 
@@ -19,12 +25,7 @@ import kotlin.coroutines.CoroutineContext
  * Sealed class representing the main Kinesis engine.
  * Handles task management, dependency resolution, and task execution in a coroutine-based system.
  */
-sealed class Kinesis : CoroutineScope, TaskManager, Task {
-
-    init {
-        // Initialize the task execution process.
-        startLaunch()
-    }
+sealed class Kinesis : CoroutineScope, TaskManager, Task, KLogger by KotlinLogging.logger("Kinesis") {
 
     /**
      * Default singleton instance of Kinesis.
@@ -42,14 +43,40 @@ sealed class Kinesis : CoroutineScope, TaskManager, Task {
      * and a global exception handler.
      */
     override val coroutineContext: CoroutineContext = SupervisorJob() + Dispatchers.IO + kinesisContext + CoroutineExceptionHandler { context, throwable ->
-        Logger.getGlobal().info("Caught exception: $throwable")
+        error("Caught exception: $throwable")
     }
 
     /**
      * Flow of tasks to be executed, starting with the current Kinesis instance itself as a task.
      */
-    private val taskProvider = MutableSharedFlow<StatefulTask>().apply {
-        tryEmit(StatefulTask(this@Kinesis)) // Register Kinesis as an initial task.
+    private val taskProvider = MutableSharedFlow<StatefulTask>(extraBufferCapacity = Int.MAX_VALUE)
+
+    private val launcher: Deferred<Unit> = async {
+        run()
+    }.apply {
+        invokeOnCompletion {
+            debug("Kinesis self start complected!")
+        }
+    }
+
+
+    private fun  hasCircularDependency(node: Class<out Task>, instance: Task? = null): Boolean {
+        val task = instance ?: node.getDeclaredConstructor().newInstance()
+
+        if (task.dependencies.isEmpty()) {
+            taskProvider.tryEmit(StatefulTask(task))
+            return false
+        }
+
+        if (!task.dependencies.contains(node)) {
+            kinesisContext.suspendTask(node)
+            if (!task.dependencies.any { hasCircularDependency(it, task) }) {
+                taskProvider.tryEmit(StatefulTask(task))
+                return false
+            }
+        }
+
+        return true
     }
 
     /**
@@ -57,39 +84,47 @@ sealed class Kinesis : CoroutineScope, TaskManager, Task {
      * @param current The task class to register.
      * @return Result indicating success or failure of the registration.
      */
-    override fun register(current: Class<Task>): Result<Boolean> {
+    override fun register(current: Class<out Task>): Result<Boolean> {
         return kotlin.runCatching {
+
+            runBlocking {
+                launcher.await()
+            }
+
             // Check if the task is already registered.
             if (kinesisContext.contains(current)) {
                 throw IllegalStateException("${current.simpleName} is already registered")
             }
 
-            // Check for circular dependencies.
-            if (kinesisContext.hasCircularDependency(current)) {
-                throw IllegalStateException("${current.simpleName} has circular references")
-            }
 
             // Create an instance of the task and emit it into the taskProvider.
             val instance = current.getDeclaredConstructor().newInstance()
-            taskProvider.tryEmit(StatefulTask(instance))
+
+            // Check for circular dependencies.
+            if (hasCircularDependency(current, instance)) {
+                throw IllegalStateException("${current.simpleName} has circular references")
+            }
+
+            kinesisContext.contains(current)
         }
     }
 
     /**
      * The dependencies of the Kinesis task, which are empty by default.
      */
-    override val dependencies: Set<Task> = emptySet()
+    override val dependencies: Set<Class<out Task>> = emptySet()
 
     /**
      * The dispatcher for running tasks, defaulting to IO.
      */
-    override val dispatcher: CoroutineDispatcher = Dispatchers.IO
+    override val dispatcher: CoroutineDispatcher = Dispatchers.Default
 
     /**
      * The main execution logic for the Kinesis task itself.
      */
     override suspend fun run() {
-        Logger.getGlobal().info("Kinesis start!")
+        info("Kinesis start!")
+        startLaunch()
     }
 
     /**
@@ -108,17 +143,27 @@ sealed class Kinesis : CoroutineScope, TaskManager, Task {
             }
 
             // Check if all dependencies are present in the Kinesis context.
-            return node.task.dependencies.filterNot { kinesisContext.contains(it.javaClass) }.isEmpty()
+            return node.task.dependencies.filterNot { kinesisContext.contains(it) }.isEmpty()
         }
 
-        // Launch a coroutine to process ready tasks.
         launch {
-            taskProvider.filter(::isTaskReady).collect(::onRunTask)
+            taskProvider.onSubscription {
+                debug("Kinesis start subscription!")
+            }.collect { task ->
+                if (isTaskReady(task)) {
+                    onRunTask(task)
+                } else {
+                    onSuspendTask(task)
+                }
+            }
+        }.invokeOnCompletion {
+            info("Kinesis start complected!")
         }
 
-        // Launch a coroutine to process tasks that are not ready.
         launch {
-            taskProvider.filterNot(::isTaskReady).collect(::onSuspendTask)
+            taskProvider.collect { task ->
+                debug("{}-{}", task.task.javaClass.name, task.monitor.value)
+            }
         }
     }
 
@@ -134,7 +179,8 @@ sealed class Kinesis : CoroutineScope, TaskManager, Task {
             kinesisContext.put(node.task.javaClass, async(node.task.dispatcher) {
                 kotlin.runCatching {
                     node.task.run() // Run the task.
-                }.onFailure {
+                }.onFailure { throwable ->
+                    error("Caught task running exception: $throwable")
                     // Update state to FAILED if the task fails.
                     node.monitor.update { TaskState.State.FAILED }
                 }.onSuccess {
@@ -150,13 +196,6 @@ sealed class Kinesis : CoroutineScope, TaskManager, Task {
      * @param node The task node to process.
      */
     private fun onSuspendTask(node: StatefulTask) {
-        kotlin.runCatching {
-            // Mark the task as suspended in the context.
-            kinesisContext.suspendTask(node.task.javaClass)
-        }.onFailure { throwable ->
-            Logger.getGlobal().severe("Caught exception: $throwable") // Log any errors.
-        }
-
         // Re-emit the task with its state updated to WAITING.
         taskProvider.tryEmit(node.apply { monitor.update { TaskState.State.WAITING } })
     }

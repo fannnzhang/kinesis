@@ -2,7 +2,6 @@ package org.kinesis.core
 
 import kotlinx.coroutines.Deferred
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.ConcurrentSkipListSet
 import kotlin.coroutines.CoroutineContext
 
 /**
@@ -15,42 +14,47 @@ class KinesisContext : CoroutineContext.Element {
     override val key: CoroutineContext.Key<*> get() = Key
 
     // Record of completed tasks and their results
-    private val taskHistoryRecorder: ConcurrentHashMap<Class<Task>, Deferred<Result<*>>> = ConcurrentHashMap()
+    private val taskHistoryRecorder: ConcurrentHashMap<Class<out Task>, Deferred<Result<*>>> = ConcurrentHashMap()
 
     // Record of tasks currently in a suspended state
-    private val suspendingTaskRecorder: ConcurrentSkipListSet<Class<Task>> = ConcurrentSkipListSet()
+    private val suspendingTaskRecorder = ConcurrentHashMap.newKeySet<Class<out Task>>()
 
     // Dependency graph to track task dependencies
-    private val dependencyGraph: ConcurrentHashMap<Class<Task>, Set<Class<Task>>> = ConcurrentHashMap()
+    private val dependencyGraph: ConcurrentHashMap<Class<out Task>, Set<Class<out Task>>> = ConcurrentHashMap()
 
-    /**
-     * Check if a task has circular dependencies.
-     *
-     * @param key The class of the task to check.
-     * @return True if a circular dependency is detected, otherwise false.
-     */
-    internal fun hasCircularDependency(key: Class<Task>): Boolean {
-        val visited = ConcurrentSkipListSet<Class<Task>>() // Thread-safe visited set
-        val stack = ConcurrentSkipListSet<Class<Task>>() // Thread-safe recursion stack
-
-        fun dfs(node: Class<Task>): Boolean {
-            if (stack.contains(node)) return true // Found a cycle
-            if (visited.contains(node)) return false
-
-            visited.add(node)
-            stack.add(node)
-
-            val dependencies = dependencyGraph[node] ?: emptySet()
-            for (dependency in dependencies) {
-                if (dfs(dependency)) return true
-            }
-
-            stack.remove(node)
-            return false
-        }
-
-        return dfs(key)
-    }
+//    /**
+//     * Check if a task has circular dependencies.
+//     *
+//     * @param key The class of the task to check.
+//     * @return True if a circular dependency is detected, otherwise false.
+//     */
+//    internal fun hasCircularDependency(key: Class<out Task>): Boolean {
+//        val visited = ConcurrentHashMap.newKeySet<Class<out Task>>() // Thread-safe visited set
+//        val stack = ConcurrentHashMap.newKeySet<Class<out Task>>() // Thread-safe recursion stack
+//
+//        fun dfs(node: Class<out Task>): Boolean {
+//            if (stack.contains(node)) return true // Found a cycle
+//            if (visited.contains(node)) return false
+//
+//            visited.add(node)
+//            stack.add(node)
+//
+//            val dependencies = dependencyGraph[node] ?: emptySet()
+//
+//            if (dependencies.contains(node)) {
+//                return true
+//            }
+//
+//            for (dependency in dependencies) {
+//                if (dfs(dependency)) return true
+//            }
+//
+//            stack.remove(node)
+//            return false
+//        }
+//
+//        return dfs(key)
+//    }
 
     /**
      * Add task dependencies to the dependency graph.
@@ -58,7 +62,8 @@ class KinesisContext : CoroutineContext.Element {
      * @param task The task to register dependencies for.
      */
     internal fun addTaskDependencies(task: Task) {
-        dependencyGraph[task.javaClass] = task.dependencies.map { it.javaClass }.toSet()
+        Kinesis.debug("DependencyGraph injected {} with dependencies {}", task.javaClass.name, task.dependencies.joinToString(","))
+        dependencyGraph[task.javaClass] = task.dependencies.map { it}.toSet()
     }
 
     /**
@@ -67,8 +72,18 @@ class KinesisContext : CoroutineContext.Element {
      * @param type The class of the task to check.
      * @return True if the task is found, otherwise false.
      */
-    internal fun contains(type: Class<Task>): Boolean {
-        return taskHistoryRecorder.containsKey(type)
+    internal fun contains(type: Class<out Task>): Boolean {
+        if (taskHistoryRecorder.containsKey(type)) {
+            return true
+        }
+
+        if (suspendingTaskRecorder.contains(type)) {
+            return synchronized(suspendingTaskRecorder) {
+                suspendingTaskRecorder.contains(type)
+            }
+        }
+
+        return false
     }
 
     /**
@@ -94,15 +109,12 @@ class KinesisContext : CoroutineContext.Element {
      *
      * @param key The class of the task to suspend.
      */
-    internal fun suspendTask(key: Class<Task>) {
+    internal fun suspendTask(key: Class<out Task>) {
         if (suspendingTaskRecorder.contains(key)) {
             throw IllegalStateException("${key.simpleName} is already marked as suspended in KinesisContext")
         }
 
         synchronized(suspendingTaskRecorder) {
-            if (hasCircularDependency(key)) {
-                throw IllegalStateException("${key.simpleName} introduces a circular dependency")
-            }
             suspendingTaskRecorder.add(key)
         }
     }

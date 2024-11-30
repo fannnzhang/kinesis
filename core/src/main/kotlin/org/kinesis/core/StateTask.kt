@@ -1,6 +1,7 @@
 package org.kinesis.core
 
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 
 internal interface TaskState {
 
@@ -20,7 +21,13 @@ internal data class StatefulTask(
     val task: Task
 ) : TaskState {
 
-    override val monitor: MutableStateFlow<TaskState.State> = MutableStateFlow(TaskState.State.PENDING)
+    override val monitor: MutableStateFlow<TaskState.State> = MutableStateFlow(TaskState.State.PENDING).also {
+        Kinesis.launch {
+            it.collect { task ->
+                Kinesis.debug("{}-{}", task.javaClass.name, it.value)
+            }
+        }
+    }
 
     // Custom equality check
     override fun equals(other: Any?): Boolean {
@@ -31,6 +38,10 @@ internal data class StatefulTask(
     // Ensure consistent hash code
     override fun hashCode(): Int {
         return task.hashCode()
+    }
+
+    override fun toString(): String {
+        return "${task.javaClass.name}-${monitor.value}"
     }
 }
 

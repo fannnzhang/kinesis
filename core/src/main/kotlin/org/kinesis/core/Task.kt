@@ -3,7 +3,7 @@ package org.kinesis.core
 import kotlinx.coroutines.CoroutineDispatcher
 
 interface Task {
-    val dependencies: Set<Task>
+    val dependencies: Set<Class<out Task>>
 
     val dispatcher: CoroutineDispatcher
 

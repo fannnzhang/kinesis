@@ -1,5 +1,5 @@
 package org.kinesis.core
 
 interface TaskManager {
-    fun register(current: Class<Task>) : Result<Boolean>
+    fun register(current: Class<out Task>) : Result<Boolean>
 }
