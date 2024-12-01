@@ -23,8 +23,8 @@ internal data class StatefulTask(
 
     override val monitor: MutableStateFlow<TaskState.State> = MutableStateFlow(TaskState.State.PENDING).also {
         Kinesis.launch {
-            it.collect { task ->
-                Kinesis.debug("{}-{}", task.javaClass.name, it.value)
+            it.collect { state ->
+                Kinesis.debug("{}-{}", task.javaClass.name, state)
             }
         }
     }

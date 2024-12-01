@@ -64,14 +64,21 @@ sealed class Kinesis : CoroutineScope, TaskManager, Task, KLogger by KotlinLoggi
         val task = instance ?: node.getDeclaredConstructor().newInstance()
 
         if (task.dependencies.isEmpty()) {
-            taskProvider.tryEmit(StatefulTask(task))
+            kinesisContext.suspendTask(node)
+            launch {
+                launcher.await()
+                taskProvider.emit(StatefulTask(task))
+            }
             return false
         }
 
         if (!task.dependencies.contains(node)) {
             kinesisContext.suspendTask(node)
             if (!task.dependencies.any { hasCircularDependency(it, task) }) {
-                taskProvider.tryEmit(StatefulTask(task))
+                launch {
+                    launcher.await()
+                    taskProvider.emit(StatefulTask(task))
+                }
                 return false
             }
         }
@@ -86,11 +93,6 @@ sealed class Kinesis : CoroutineScope, TaskManager, Task, KLogger by KotlinLoggi
      */
     override fun register(current: Class<out Task>): Result<Boolean> {
         return kotlin.runCatching {
-
-            runBlocking {
-                launcher.await()
-            }
-
             // Check if the task is already registered.
             if (kinesisContext.contains(current)) {
                 throw IllegalStateException("${current.simpleName} is already registered")

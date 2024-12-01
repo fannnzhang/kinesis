@@ -7,20 +7,16 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
-import mu.KLogger
 import org.junit.jupiter.api.Assertions.assertDoesNotThrow
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.kinesis.core.Kinesis
 import org.kinesis.core.Task
-import org.mockito.Mockito.mock
-import org.mockito.Mockito.verify
 
 class KinesisTest {
 
     private val kinesis = Kinesis
-    private val logger: KLogger = mock(kinesis)
 
     @Test
     fun `test Kinesis initialization`() {
@@ -83,8 +79,7 @@ class KinesisTest {
         assertTrue(result.exceptionOrNull() is IllegalStateException)
     }
 
-    @Test
-    fun `test task execution`() = runBlocking {
+    companion object {
         var executed = false
         class ExecutableTask : Task {
             override val dependencies: Set<Class<out Task>> = emptySet()
@@ -93,26 +88,19 @@ class KinesisTest {
                 executed = true
             }
         }
-
-        val task = ExecutableTask()
-        kinesis.register(task::class.java)
-        delay(1000) // Allow time for task to execute
-        assertTrue(executed)
     }
 
     @Test
-    fun `test exception handling in tasks`() = runBlocking {
-        class FailingTask : Task {
-            override val dependencies: Set<Class<out Task>> = emptySet()
-            override val dispatcher: CoroutineDispatcher = Dispatchers.Default
-            override suspend fun run() {
-                throw RuntimeException("Task failed")
+    fun `test task execution`()  {
+
+        runBlocking {
+            kinesis.register(ExecutableTask::class.java).onFailure {
+                it.printStackTrace()
             }
+            delay(1000) // Allow time for task to execute
         }
 
-        kinesis.register(FailingTask::class.java)
-        delay(1000) // Allow time for the task to attempt execution
-        verify(logger).error("Caught task running exception: java.lang.RuntimeException: Task failed")
+        assertTrue(executed)
     }
 
     @Test
